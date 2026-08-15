@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
-import * as ProductService from "./product.service";
+import * as ProductService from "./product.service.js";
+import { BadRequestError, NotFoundError } from "../../errors.js";
 
 export async function createProduct(
     req: Request,
@@ -18,23 +19,19 @@ export async function getProductById(
     req: Request,
     res: Response,
     next: NextFunction
-) { 
+) {
     try {
-        const id = await Number(req.params.id);
+        const id = Number(req.params.id);
 
         if (!Number.isInteger(id)) {
-            res.status(400).json({
-                message: "Invalid product id"
-            });
+            next(new BadRequestError("Invalid product id"));
             return;
         }
 
         const product = await ProductService.getProductById(id);
 
-        if(!product){
-            res.status(400).json({
-                message: "Product not found",
-            });
+        if (!product) {
+            next(new NotFoundError("Product not found"));
             return;
         }
 

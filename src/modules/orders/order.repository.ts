@@ -1,5 +1,17 @@
 import type {PoolClient} from "pg";
 
+export async function productExists(
+    client: PoolClient,
+    productId: number
+){
+    const result = await client.query(
+        `SELECT id FROM products WHERE id = $1`,
+        [productId]
+    );
+
+    return result.rows.length > 0;
+}
+
 export async function decrementStock(
     client: PoolClient,
     productId: number,
@@ -25,8 +37,8 @@ export async function createOrder(
 ){
     const result = await client.query(
         `
-        INSERT INTO orders (product_id, qty)
-        VALUES ($1, $2)
+        INSERT INTO orders (product_id, qty, status)
+        VALUES ($1, $2, $3)
         RETURNING *
         `,
         [productId, qty, "confirmed"]

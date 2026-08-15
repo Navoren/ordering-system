@@ -4,6 +4,8 @@
 
 **Verdict:** The layering (routes → controller → service → repository) is the right shape and the concurrency-safe stock decrement is the right *idea*. But as committed, **the app does not run**: dependencies used by npm scripts aren't installed, the schema has a typo that breaks table creation, and `POST /orders` cannot ever succeed because of a parameter/column mismatch. On top of that, the one bug that matters most for the "connection pooling" learning goal — a client that's never released back to the pool — is present on the exact code path that currently always throws, meaning the pool would exhaust after ~10 requests even once the SQL bug is fixed. None of this is exotic; it reads like it was written top-to-bottom without ever hitting the endpoints against a real database.
 
+> **Status as of the second pass (§7 below): fixed, migrated, and verified live against the project's Neon Postgres instance**, including a 20-concurrent-request race test against limited stock. Sections 1–6 below are kept as the original findings (what was wrong and why); §7 documents what was re-checked, what was fixed, and the evidence.
+
 ---
 
 ## 1. Critical bugs (app is non-functional)
@@ -246,3 +248,42 @@ The single atomic `UPDATE ... WHERE stock_qty >= $1` already in the code is the 
 9. Decide on and apply a fix for the `NUMERIC` string-vs-number mismatch (§2.5) before anything does arithmetic on a fetched price.
 
 Once 1–4 are done, the API is functionally correct for the spec. 5–9 are what keep it correct and debuggable once this stops being the only code touching the database.
+
+---
+
+## 7. Re-analysis pass — what changed, what was fixed, and verification
+
+This section covers a second pass: re-reading the codebase against the findings above, then actually applying and verifying fixes rather than leaving them as recommendations.
+
+### 7.1 What had already changed independently
+Between the first review and this pass, a few items from §1/§6 were already addressed in the working tree (not by this pass): `tsx` and `node-pg-migrate` were added to `devDependencies`; [order.service.ts](src/modules/orders/order.service.ts)'s `client.release;` → `client.release();` was corrected; [order.routes.ts](src/modules/orders/order.routes.ts)'s id-lookup route was already `router.get(...)`; [order.repository.ts](src/modules/orders/order.repository.ts)'s parameter naming was already aligned to `qty`; and `schema.sql` already had `REFERENCES` spelled correctly with a `DEFAULT 'pending'` status. Good progress — but the INSERT itself (§1.1) was still broken: `INSERT INTO orders (product_id, qty)` with 2 placeholders bound against 3 values, so `POST /orders` still threw on every call. That's the one this pass fixed first.
+
+### 7.2 Fixes applied this pass
+
+| # | Fix | Where |
+|---|---|---|
+| 1 | Corrected the `orders` INSERT to list `product_id, qty, status` with 3 placeholders, matching the 3 bound values (`"confirmed"` on success, since stock is decremented atomically in the same transaction — there's no separate async fulfillment step yet) | [order.repository.ts](src/modules/orders/order.repository.ts) |
+| 2 | Added a real migration (`migrations/1786800243488_init.sql`, run via `npm run migrate:up` / `migrate:down` using `node-pg-migrate`, which was already installed but unused) so the schema is applied reproducibly instead of existing only as an unreferenced `.sql` file. Added indexes on `orders.product_id` (FK, not auto-indexed by Postgres) and `orders(status, created_at)` (future order-scanning queries). `schema.sql` is kept as a synced human-readable reference, now with `TIMESTAMPTZ` instead of `TIMESTAMP` | [migrations/](migrations/), [schema.sql](src/models/schema.sql) |
+| 3 | Added `docker-compose.yml` for a local Postgres, matching `.env.example`'s `postgresql://postgres:password@localhost:5432/mydb` — the assignment offered this and nothing existed yet | [docker-compose.yml](docker-compose.yml) |
+| 4 | Added an `AppError`/`BadRequestError`/`NotFoundError`/`ConflictError` hierarchy and rewired the error middleware to use `error.statusCode` instead of hardcoding 500 for everything; unexpected (non-`AppError`) errors are still logged in full server-side but no longer echo internal messages back to the client | [errors.ts](src/errors.ts), [error.middleware.ts](src/middlewares/error.middleware.ts) |
+| 5 | Wired the existing-but-unused `createProductSchema`/`createOrderSchema` zod schemas into a `validateBody` middleware applied at the route level; deleted the hand-rolled, incomplete duplicate checks from both services | [validate.middleware.ts](src/middlewares/validate.middleware.ts), [product.routes.ts](src/modules/products/product.routes.ts), [order.routes.ts](src/modules/orders/order.routes.ts), [product.service.ts](src/modules/products/product.service.ts), [order.service.ts](src/modules/orders/order.service.ts) |
+| 6 | Split "insufficient stock" from "product not found" into `ConflictError` (409) vs `NotFoundError` (404) via a cheap existence check inside the same transaction, instead of one ambiguous message; fixed both `getProductById`/`getOrderById` not-found paths to return 404 instead of 400 | [order.service.ts](src/modules/orders/order.service.ts), [order.controller.ts](src/modules/orders/order.controller.ts), [product.controller.ts](src/modules/products/product.controller.ts) |
+| 7 | Registered a type parser for OID 1700 (`NUMERIC`) so `price` comes back as a JS `number`, matching its TS type, instead of the string `pg` returns by default | [db/client.ts](src/db/client.ts) |
+| 8 | Fixed the startup connection leak (`pool.connect()` → `pool.query('SELECT 1')`, which auto-releases) and added `SIGTERM`/`SIGINT` handling to close the pool and HTTP server on shutdown | [server.ts](src/server.ts) |
+| 9 | Added `typescript` to `devDependencies` (referenced by `typecheck`/`build` but never installed) and changed `start` to run the compiled `dist/server.js` instead of a `ts-node/esm` loader that also was never installed | [package.json](package.json) |
+| 10 | Added explicit `.js` extensions to every relative import across the codebase. This one wasn't in the original report because `tsc` wasn't installed yet to surface it: with `"moduleResolution": "NodeNext"` (already in `tsconfig.json`), TypeScript requires extensioned specifiers on relative ESM imports — every single relative import in the project was missing this, so `tsc --noEmit`/`tsc` failed on ~25 errors the moment `typescript` was actually installed. `tsx` (used for `dev`) resolves extensionless imports anyway via esbuild, which is almost certainly why this went unnoticed — the dev loop "worked" while the production build path was silently broken | all `src/**/*.ts` |
+
+### 7.3 Verification (live, against the project's actual Neon Postgres instance)
+
+Ran `npm run migrate:up`, confirmed via direct query that both tables now have the corrected columns/defaults/indexes, then built (`npm run build`) and booted `dist/server.js` against the real `DATABASE_URL`, and exercised it with `curl`:
+
+- `POST /products` → `201`, `GET /products/:id` → `200`; nonexistent id → `404`; non-numeric id → `400`; missing `name` in body → `400` with the zod issue list attached (previously this would have hit the DB and failed there, or silently inserted `undefined`).
+- `POST /orders` for 3 units against a product with 5 in stock → `201`, `status: "confirmed"`; `GET /orders/:id` → `200`; stock correctly read back as `2` afterward.
+- Over-ordering (100 units against 2 remaining) → `409` (previously this — and every order — threw a raw 500 from the broken INSERT).
+- Ordering against a nonexistent `product_id` → `404`, distinct from the `409` above (previously both were the same blended 500 message).
+- Malformed order body (`qty: 0`) → `400` with the zod issue list.
+- **Concurrency**: created a product with `stock_qty: 10` and fired 20 concurrent `POST /orders` requests (1 unit each) at it. Result: **exactly 10 succeeded (`201`), exactly 10 got `409`**, final stock landed at exactly `0` — no overselling, no lost updates, confirming the atomic conditional-`UPDATE` design in §3 holds under real concurrent load. All 20 requests completed normally with no hang, confirming the pool-exhaustion bug (§1.3, already fixed in the working tree by the time of this pass) is actually gone in practice, not just in a code read — 20 concurrent requests against a pool with a default `max` of 10 would previously have deadlocked past the 10th if any single one of them threw past the `finally`.
+
+Test data created during verification was cleaned up afterward (`DELETE FROM orders; DELETE FROM products;`, sequences reset) — the DB was left as it was found, aside from the schema now existing via the migration.
+
+`npm run typecheck` and `npm run build` both pass cleanly with no errors as of this pass.

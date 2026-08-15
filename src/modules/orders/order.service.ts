@@ -1,16 +1,9 @@
-import { pool } from '../../db/client';
-import * as orderRepository from "./order.repository";
-import type { CreateOrderDTO } from './order.types';
+import { pool } from '../../db/client.js';
+import * as orderRepository from "./order.repository.js";
+import type { CreateOrderDTO } from './order.types.js';
+import { ConflictError, NotFoundError } from '../../errors.js';
 
 export async function createOrder(input: CreateOrderDTO) {
-    if (!Number.isInteger(input.product_id)) {
-        throw new Error('Invalid product_id');
-    }
-
-    if (!Number.isInteger(input.qty) || input.qty <= 0) {
-        throw new Error('Qty. must be greater than zero');
-    }
-
     const client = await pool.connect();
 
     try {
@@ -23,7 +16,21 @@ export async function createOrder(input: CreateOrderDTO) {
         );
 
         if (!product) {
-            throw new Error("Insufficient stock or product not found");
+            // The conditional UPDATE in decrementStock returns no row both when
+            // the product doesn't exist and when it exists but lacks stock.
+            // Disambiguate with a cheap existence check, in the same
+            // transaction, so callers get 404 vs 409 instead of one blended error.
+            const exists = await orderRepository.productExists(client, input.product_id);
+
+            if (!exists) {
+                throw new NotFoundError(
+                    `Product ${input.product_id} not found`
+                );
+            }
+
+            throw new ConflictError(
+                `Insufficient stock for product ${input.product_id}`
+            );
         }
 
         const order = await orderRepository.createOrder(
@@ -35,7 +42,7 @@ export async function createOrder(input: CreateOrderDTO) {
         await client.query("COMMIT");
 
         return order;
-    }catch(error){
+    } catch (error) {
         await client.query("ROLLBACK");
         throw error;
     } finally {

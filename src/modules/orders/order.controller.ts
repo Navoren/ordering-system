@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
-import * as OrderService from "./order.service";
+import * as OrderService from "./order.service.js";
+import { BadRequestError, NotFoundError } from "../../errors.js";
 
 export async function createOrder(
     req: Request,
@@ -8,7 +9,7 @@ export async function createOrder(
 ) {
     try {
         const order = await OrderService.createOrder(req.body);
-    
+
         res.status(201).json(order);
     } catch (error) {
         next(error);
@@ -21,21 +22,17 @@ export async function getOrderById(
     next: NextFunction
 ) {
     try {
-        const id = await Number(req.params.id);
+        const id = Number(req.params.id);
 
         if (!Number.isInteger(id)) {
-            res.status(400).json({
-                message: "Invalid order id"
-            });
+            next(new BadRequestError("Invalid order id"));
             return;
         }
 
         const order = await OrderService.getOrderById(id);
 
-        if(!order){
-            res.status(400).json({
-                message: "Order not found",
-            });
+        if (!order) {
+            next(new NotFoundError("Order not found"));
             return;
         }
 

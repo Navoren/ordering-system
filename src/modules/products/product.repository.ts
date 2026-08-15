@@ -1,5 +1,5 @@
-import { pool } from "../../db/client";
-import type { CreateProductDTO, Product } from "./product.types";
+import { pool } from "../../db/client.js";
+import type { CreateProductDTO, Product } from "./product.types.js";
 
 export async function createProduct(input: CreateProductDTO) {
     const result = await pool.query(
@@ -8,7 +8,7 @@ export async function createProduct(input: CreateProductDTO) {
         VALUES ($1, $2, $3, $4)
         RETURNING id, name, description, price, stock_qty
         `,
-        [input.name, input.description, input.price, input.stock_qty]
+        [input.name, input.description ?? null, input.price, input.stock_qty]
     );
     return result.rows[0] as Product;
 }

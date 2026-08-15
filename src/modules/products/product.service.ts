@@ -1,18 +1,12 @@
-import * as productRepository from './product.repository';
-import type { CreateProductDTO } from './product.types';
+import * as productRepository from './product.repository.js';
+import type { CreateProductDTO } from './product.types.js';
 
-export async function createProduct(input : CreateProductDTO){
-    if (input.name.trim().length === 0) {
-        throw new Error("Product name is required");
-    }
-
-    if (input.price < 0) {
-        throw new Error("Product price cannot be negative");
-    }
-
-    if (input.stock_qty < 0) {
-        throw new Error("Stock qty cannot be negative");
-    }
+// Input shape/range checks now happen once, at the route boundary, via
+// validateBody(createProductSchema) — see product.routes.ts. Re-checking the
+// same constraints here by hand was how this drifted out of sync before
+// (description wasn't checked at all, and this ran even though the zod
+// schema already covered it more completely).
+export async function createProduct(input: CreateProductDTO) {
     return productRepository.createProduct(input);
 }
 
