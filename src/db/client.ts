@@ -8,7 +8,10 @@ import { env } from "../config/env.js";
 types.setTypeParser(1700, (value: string) => parseFloat(value));
 
 export const pool = new Pool({
-    connectionString: env.DATABASE_URL
+    connectionString: env.DATABASE_URL,
+    idleTimeoutMillis: 15000,
+    connectionTimeoutMillis: 10000,
+    max: 10
 });
 
 pool.on("error", (err: Error) => {
