@@ -1,10 +1,10 @@
-import { pool } from '../../db/client.js';
+import { getClient, pool } from '../../db/client.js';
 import * as orderRepository from "./order.repository.js";
 import type { CreateOrderDTO } from './order.types.js';
 import { ConflictError, NotFoundError } from '../../errors.js';
 
 export async function createOrder(input: CreateOrderDTO) {
-    const client = await pool.connect();
+    const client = await getClient();
 
     try {
         await client.query("BEGIN");
@@ -51,7 +51,7 @@ export async function createOrder(input: CreateOrderDTO) {
 }
 
 export async function getOrderById(orderId: number) {
-  const client = await pool.connect();
+  const client = await getClient();
 
   try {
     return await orderRepository.getOrderById(client, orderId);
